@@ -1,6 +1,9 @@
 import * as AWS from "@/AWS";
 import { HelmChart } from "@/AWS/EKS/HelmChart.ts";
-import { renderHelmChart } from "@/AWS/EKS/internal/helm.ts";
+import {
+  parseRenderedManifests,
+  renderHelmChart,
+} from "@/AWS/EKS/internal/helm.ts";
 import * as Provider from "@/Provider";
 import * as Test from "@/Test/Alchemy";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -89,10 +92,73 @@ describe("renderHelmChart (local fixture)", (it) => {
   );
 });
 
-// Ungated probe: chart objects live in-cluster with no AWS-side enumeration
-// attributing them to alchemy, so `list()` is intentionally empty. Proves
-// the provider is registered and its record type-checks; the live apply
-// path rides the gated Deployment E2E cluster (Deployment.test.ts).
+describe("parseRenderedManifests", (it) => {
+  it.effect("ignores Helm OCI pull metadata", () =>
+    Effect.gen(function* () {
+      const objects = yield* parseRenderedManifests(
+        "oci://registry.example.test/charts/example",
+        `Pulled: registry.example.test/charts/example:1.2.3
+Digest: sha256:0123456789abcdef
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: example
+`,
+      );
+
+      expect(objects).toHaveLength(1);
+      expect(objects[0]?.kind).toBe("ConfigMap");
+      expect(objects[0]?.metadata.name).toBe("example");
+    }),
+  );
+
+  it.effect("rejects pull-shaped metadata for non-OCI charts", () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.result(
+        parseRenderedManifests(
+          "example",
+          `Pulled: registry.example.test/charts/example:1.2.3
+Digest: sha256:0123456789abcdef
+`,
+        ),
+      );
+
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure._tag).toBe("HelmError");
+      }
+    }),
+  );
+
+  it.effect("rejects pull metadata that is not the leading OCI preamble", () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.result(
+        parseRenderedManifests(
+          "oci://registry.example.test/charts/example",
+          `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: example
+---
+Pulled: registry.example.test/charts/example:1.2.3
+Digest: sha256:0123456789abcdef
+`,
+        ),
+      );
+
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure._tag).toBe("HelmError");
+      }
+    }),
+  );
+});
+
+// Ungated probe: chart objects live in-cluster with no AWS-side
+// enumeration attributing them to alchemy, so `list()` is intentionally
+// empty. Proves the provider is registered and its record type-checks; the
+// live apply path rides the gated Deployment E2E cluster (Deployment.test.ts).
 test.provider("list returns an empty array (in-cluster objects)", () =>
   Effect.gen(function* () {
     const provider = yield* Provider.findProvider(HelmChart);
